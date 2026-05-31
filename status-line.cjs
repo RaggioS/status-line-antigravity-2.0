@@ -108,6 +108,29 @@ function calculateFileTokens(filePath) {
   }
 }
 
+// ─── Persistent storage helpers ──────────────────────────────────────────────
+function loadPersistedSteps(appData, convId) {
+  const tokenFile = path.join(appData, 'brain', convId, 'session_tokens.json');
+  if (fs.existsSync(tokenFile)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
+      return data.steps || {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function savePersistedSteps(appData, convId, steps) {
+  const brainDir = path.join(appData, 'brain', convId);
+  if (!fs.existsSync(brainDir)) return;
+  const tokenFile = path.join(brainDir, 'session_tokens.json');
+  try {
+    fs.writeFileSync(tokenFile, JSON.stringify({ steps }, null, 2), 'utf8');
+  } catch {}
+}
+
 // ─── Transcript parsing and stats ───────────────────────────────────────────
 const STEP_NAMES = [
   '', 'Orientation', 'Sizing', 'Workspace', 'Planning',
@@ -161,7 +184,7 @@ let claudeMdTokens = 0;
 let modelName = 'Gemini 3.5 Flash';
 let contextLimit = 1000000;
 
-function parseTranscriptFile(logPath) {
+function parseTranscriptFile(logPath, appData, convId) {
   if (!fs.existsSync(logPath)) return;
   
   let content;
@@ -172,9 +195,11 @@ function parseTranscriptFile(logPath) {
   }
 
   const lines = content.split('\n');
-  let cumulativeChars = 0;
   let currentModelName = 'Gemini 3.5 Flash';
   let currentContextLimit = 1000000;
+
+  // Load previously persisted step token counts
+  const persistedSteps = loadPersistedSteps(appData, convId);
 
   // Reset character counts for interactive UI view
   state.userChars = 0;
@@ -202,7 +227,10 @@ function parseTranscriptFile(logPath) {
       state.toolChars += stepChars;
     }
 
-    cumulativeChars += stepChars;
+    // Save tokens for this specific step index in the persistent map
+    if (step.step_index !== undefined) {
+      persistedSteps[step.step_index] = Math.floor(stepChars / CHARS_PER_TOKEN);
+    }
 
     // Model selection parsing with strict regex boundary checks
     if (step.content && step.content.includes('Model Selection')) {
@@ -267,7 +295,12 @@ function parseTranscriptFile(logPath) {
     }
   });
 
-  transcriptTokens = Math.floor(cumulativeChars / CHARS_PER_TOKEN);
+  // Save the updated steps back to the persistent file
+  savePersistedSteps(appData, convId, persistedSteps);
+
+  // Sum all steps in the map to get cumulative transcript tokens
+  transcriptTokens = Object.values(persistedSteps).reduce((sum, val) => sum + val, 0);
+
   modelName = currentModelName;
   contextLimit = currentContextLimit;
 }
@@ -380,13 +413,13 @@ function main() {
   claudeMdTokens = calculateFileTokens(claudeMdPath);
 
   if (STATUS) {
-    parseTranscriptFile(conv.logPath);
+    parseTranscriptFile(conv.logPath, conv.appData, conv.convId);
     process.stdout.write(getStatusLineString() + '\n');
     process.exit(0);
   }
 
   if (ONCE) {
-    parseTranscriptFile(conv.logPath);
+    parseTranscriptFile(conv.logPath, conv.appData, conv.convId);
     process.stdout.write(render(conv.convId) + '\n');
     process.exit(0);
   }
@@ -400,12 +433,12 @@ function main() {
   });
 
   // Init scan
-  parseTranscriptFile(conv.logPath);
+  parseTranscriptFile(conv.logPath, conv.appData, conv.convId);
   process.stdout.write(CLR + render(conv.convId));
 
   // Loop poll
   setInterval(() => {
-    parseTranscriptFile(conv.logPath);
+    parseTranscriptFile(conv.logPath, conv.appData, conv.convId);
     process.stdout.write(CLR + render(conv.convId));
   }, INTERVAL);
 }
