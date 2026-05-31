@@ -36,7 +36,6 @@ const STATUS   = argv.status === true;
 const INTERVAL = 1000; // ms between refreshes
 
 const BASE_SYSTEM_PROMPT_TOKENS = 5000;
-const CHARS_PER_TOKEN = 3.8;
 
 // ─── ANSI helpers ───────────────────────────────────────────────────────────
 const ESC = '\x1B';
@@ -97,12 +96,27 @@ function getLatestConversation() {
   return allConversations[0];
 }
 
+// Global parsing variables & limits
+let transcriptTokens = 0;
+let claudeMdTokens = 0;
+let currentPromptTokens = 0;
+let modelName = 'Gemini 3.5 Flash';
+let contextLimit = 1000000;
+
+// ─── Token Model Ratios ──────────────────────────────────────────────────────
+function getRatioForModel(name) {
+  const n = name.toLowerCase();
+  if (n.includes('gemini')) return 3.14; // Weighted average for coding sessions (code/JSON/IT/EN)
+  if (n.includes('claude') || n.includes('sonnet')) return 2.78; // Claude BPE tokenizer
+  return 3.0; // General safe fallback
+}
+
 // ─── Token and file helpers ──────────────────────────────────────────────────
 function calculateFileTokens(filePath) {
   if (!fs.existsSync(filePath)) return 0;
   try {
     const content = fs.readFileSync(filePath, 'utf8');
-    return Math.floor(content.length / CHARS_PER_TOKEN);
+    return Math.floor(content.length / getRatioForModel(modelName));
   } catch {
     return 0;
   }
@@ -178,13 +192,6 @@ function set(step, phase, subTask, historyLabel, histNum) {
   addHistory(historyLabel, histNum);
 }
 
-// Global parsing results (updated live)
-let transcriptTokens = 0;
-let claudeMdTokens = 0;
-let currentPromptTokens = 0;
-let modelName = 'Gemini 3.5 Flash';
-let contextLimit = 1000000;
-
 function parseTranscriptFile(logPath, appData, convId) {
   if (!fs.existsSync(logPath)) return;
   
@@ -233,11 +240,6 @@ function parseTranscriptFile(logPath, appData, convId) {
       state.toolChars += stepChars;
     }
 
-    // Save tokens for this specific step index in the persistent map
-    if (step.step_index !== undefined) {
-      steps[step.step_index] = Math.floor(stepChars / CHARS_PER_TOKEN);
-    }
-
     // Model selection parsing with strict regex boundary checks
     if (step.content && step.content.includes('Model Selection')) {
       const match = step.content.match(/Model Selection.*?(?:from\s+[a-zA-Z0-9.\s()]+)?\s+to\s+([a-zA-Z0-9.\s()]+)/i);
@@ -254,6 +256,12 @@ function parseTranscriptFile(logPath, appData, convId) {
           currentContextLimit = 200000;
         }
       }
+    }
+
+    // Save tokens using current model specific characters-per-token ratio
+    if (step.step_index !== undefined) {
+      const ratio = getRatioForModel(currentModelName);
+      steps[step.step_index] = Math.floor(stepChars / ratio);
     }
 
     // Step detection for terminal activity view
@@ -327,11 +335,6 @@ function fmtTokens(n) {
   return String(n);
 }
 
-function asciiBar(pct, width, filledChar = '█', emptyChar = '░') {
-  const filled = Math.round((pct / 100) * width);
-  return filledChar.repeat(filled) + emptyChar.repeat(width - filled);
-}
-
 // ─── Render ───────────────────────────────────────────────────────────────────
 function render(convId) {
   const total = BASE_SYSTEM_PROMPT_TOKENS + claudeMdTokens + transcriptTokens;
@@ -365,6 +368,10 @@ function render(convId) {
   const W = Math.min(process.stdout.columns || 80, 80);
   const BAR_W = W - 22;
 
+  // Render ASCII progress bar
+  const filled = Math.round((percentContext / 100) * BAR_W);
+  const bar = ctxBarColor + '█'.repeat(filled) + c.dim + '░'.repeat(BAR_W - filled) + c.reset;
+
   const lines = [
     colored(c.bpurple, '  ◈  STATUS LINE') +
       colored(c.gray, '  Antigravity Monitor') +
@@ -376,7 +383,7 @@ function render(convId) {
     colored(c.gray, '  Last prompt: ') + colored(c.dim, promptExcerpt),
     '',
     colored(c.bwhite, '  Context Window  ') +
-      ctxBarColor + asciiBar(percentContext, BAR_W) + c.reset +
+      bar +
       colored(c.gray, '  ' + ctxPctFmt),
     colored(c.gray, '  ') +
       colored(c.cyan, `${fmtTokens(contextLimit - total)} remaining`) +
@@ -391,7 +398,7 @@ function render(convId) {
     '',
     colored(c.bwhite, '  Last Turn Increment  ') +
       colored(c.byellow, `+${fmtTokens(currentPromptTokens)}`) +
-      colored(c.gray, ' net new tokens added in the last user/model turn'),
+      colored(c.gray, ` net new tokens added using 1 token ≈ ${getRatioForModel(modelName)} chars ratio`),
     '',
     colored(c.bwhite, '  Pipeline  ') +
       (step > 0
