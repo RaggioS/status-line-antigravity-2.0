@@ -65,7 +65,7 @@ status-line-monitor --status --conversationId <uuid>
 | Metric | Source | Real? |
 |---|---|---|
 | **Context window** | Transcript model selection (1M/2M limits) | ✅ Real |
-| **Token estimate** | `chars / 3.8` from log content + CLAUDE.md | ✅ Real |
+| **Token estimate** | Dynamic characters-per-token ratio (3.14 for Gemini, 2.78 for Claude) | ✅ Real |
 | **Token breakdown** | Classified user/model/tools character counts | ✅ Real |
 | **Pipeline step** | Pattern-matched from `tool_calls` | ✅ Real |
 | **Compaction proof** | Stores step-tokens in a persistent JSON database | ✅ Real |
