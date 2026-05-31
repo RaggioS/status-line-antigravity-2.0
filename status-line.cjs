@@ -4,12 +4,10 @@
  *
  * Usage:
  *   node status-line.cjs
+ *   node status-line.cjs --status        (prints single status line and exits)
+ *   node status-line.cjs --once          (prints dashboard once and exits)
  *   node status-line.cjs --conversationId <uuid>
  *   node status-line.cjs --appDataDir "C:\path\to\antigravity"
- *   node status-line.cjs --once          (print once and exit)
- *
- * No npm install needed. Pure Node.js built-ins only.
- * Press Ctrl+C to exit.
  */
 
 'use strict';
@@ -27,11 +25,18 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
-const APP_DATA = argv.appDataDir || 'C:\\Users\\raimo\\.gemini\\antigravity';
+const APP_DATA_DIRS = [
+  'C:\\Users\\raimo\\.gemini\\antigravity',
+  'C:\\Users\\raimo\\.gemini\\antigravity-cli',
+  'C:\\Users\\raimo\\.gemini\\antigravity-ide'
+];
+
 const ONCE     = argv.once === true;
+const STATUS   = argv.status === true;
 const INTERVAL = 1000; // ms between refreshes
-const FIVE_H   = 5 * 60 * 60 * 1000;
-const SIX_H    = 6 * 60 * 60 * 1000;
+
+const BASE_SYSTEM_PROMPT_TOKENS = 5000;
+const CHARS_PER_TOKEN = 3.8;
 
 // ─── ANSI helpers ───────────────────────────────────────────────────────────
 const ESC = '\x1B';
@@ -43,7 +48,6 @@ const c = {
   reset:   ESC + '[0m',
   bold:    ESC + '[1m',
   dim:     ESC + '[2m',
-  // foreground
   white:   ESC + '[97m',
   gray:    ESC + '[90m',
   purple:  ESC + '[35m',
@@ -52,7 +56,6 @@ const c = {
   yellow:  ESC + '[33m',
   red:     ESC + '[31m',
   blue:    ESC + '[34m',
-  // bright
   bwhite:  ESC + '[1;97m',
   bpurple: ESC + '[1;35m',
   bcyan:   ESC + '[1;36m',
@@ -64,22 +67,48 @@ const c = {
 function colored(color, text) { return color + text + c.reset; }
 
 // ─── Auto-detect most recent conversation ───────────────────────────────────
-function detectConversationId() {
-  if (argv.conversationId) return argv.conversationId;
-  const brainDir = path.join(APP_DATA, 'brain');
-  if (!fs.existsSync(brainDir)) return null;
-  try {
-    return fs.readdirSync(brainDir)
-      .filter(n => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(n))
-      .map(n => {
-        try { return { n, mtime: fs.statSync(path.join(brainDir, n)).mtimeMs }; }
-        catch { return { n, mtime: 0 }; }
-      })
-      .sort((a, b) => b.mtime - a.mtime)[0]?.n || null;
-  } catch { return null; }
+function getLatestConversation() {
+  if (argv.conversationId) {
+    const appData = argv.appDataDir || APP_DATA_DIRS[0];
+    const logPath = path.join(appData, 'brain', argv.conversationId, '.system_generated', 'logs', 'transcript.jsonl');
+    return { convId: argv.conversationId, logPath, appData };
+  }
+
+  const allConversations = [];
+  for (const appDir of APP_DATA_DIRS) {
+    const brainDir = path.join(appDir, 'brain');
+    if (!fs.existsSync(brainDir)) continue;
+    try {
+      const dirs = fs.readdirSync(brainDir);
+      for (const d of dirs) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(d)) continue;
+        const logPath = path.join(brainDir, d, '.system_generated', 'logs', 'transcript.jsonl');
+        if (!fs.existsSync(logPath)) continue;
+        try {
+          const mtime = fs.statSync(logPath).mtimeMs;
+          allConversations.push({ convId: d, logPath, appData: appDir, mtime });
+        } catch {}
+      }
+    } catch {}
+  }
+
+  if (allConversations.length === 0) return null;
+  allConversations.sort((a, b) => b.mtime - a.mtime);
+  return allConversations[0];
 }
 
-// ─── Session state ───────────────────────────────────────────────────────────
+// ─── Token and file helpers ──────────────────────────────────────────────────
+function calculateFileTokens(filePath) {
+  if (!fs.existsSync(filePath)) return 0;
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    return Math.floor(content.length / CHARS_PER_TOKEN);
+  } catch {
+    return 0;
+  }
+}
+
+// ─── Transcript parsing and stats ───────────────────────────────────────────
 const STEP_NAMES = [
   '', 'Orientation', 'Sizing', 'Workspace', 'Planning',
   'Gate A', 'Execution', 'Gate B', 'Verification', 'Commit', 'Response'
@@ -103,7 +132,6 @@ const state = {
   initialized: false,
 };
 
-// ─── Log helpers ─────────────────────────────────────────────────────────────
 function addLog(msg, type = 'INFO') {
   const entry = `[${type}] ${msg}`;
   state.consoleLogs.push(entry);
@@ -120,106 +148,6 @@ function addHistory(stepName, stepNum) {
   }
 }
 
-// ─── Transcript line processor ───────────────────────────────────────────────
-function processLine(line) {
-  if (!line.trim()) return;
-  let step;
-  try { step = JSON.parse(line); }
-  catch { return; }
-
-  // Accumulate character counts in 5h window
-  if (step.created_at) {
-    const ts = new Date(step.created_at).getTime();
-    if (ts > Date.now() - FIVE_H) {
-      if (!state.firstStepTimestamp || ts < state.firstStepTimestamp)
-        state.firstStepTimestamp = ts;
-
-      if (step.source === 'USER_EXPLICIT') {
-        if (step.content) state.userChars += step.content.length;
-      } else if (step.source === 'MODEL') {
-        if (step.thinking) state.modelChars += step.thinking.length;
-        if (step.type === 'PLANNER_RESPONSE') {
-          if (step.content) state.modelChars += step.content.length;
-        } else {
-          if (step.content) state.toolChars += step.content.length;
-        }
-        if (step.tool_calls)
-          step.tool_calls.forEach(c => { state.toolChars += JSON.stringify(c).length; });
-      } else if (step.source === 'SYSTEM') {
-        if (step.content) state.toolChars += step.content.length;
-      }
-    }
-  }
-
-  // Tool calls → step detection
-  if (step.source === 'MODEL' && step.tool_calls?.length) {
-    step.tool_calls.forEach(call => {
-      const t   = call.name;
-      const a   = call.arguments || call.args || {};
-
-      if (['view_file','list_dir','grep_search'].includes(t)) {
-        const file = a.AbsolutePath || a.DirectoryPath || a.SearchPath || '';
-        if (file.includes('implementation_plan.md')) {
-          set(4,'planning','Reviewing implementation plan', 'Planning', 4);
-          addLog('Reading implementation plan…');
-        } else if (file.includes('task.md')) {
-          set(6,'execution','Checking task list', 'Execution', 6);
-          addLog('Checking task.md…');
-        } else {
-          set(3,'workspace','Scanning files', 'Workspace', 3);
-          addLog('Reading: ' + path.basename(file || 'unknown'));
-        }
-      }
-      else if (['write_to_file','replace_file_content','multi_replace_file_content'].includes(t)) {
-        const file = a.TargetFile || '';
-        set(6,'execution','Writing code', 'Execution', 6);
-        addLog('Writing: ' + path.basename(file), 'SUCCESS');
-      }
-      else if (t === 'invoke_subagent') {
-        set(6,'execution','Spawning subagent', 'Execution', 6);
-        addLog('Spawning subagent…');
-      }
-      else if (t === 'run_command') {
-        const cmd = (a.CommandLine || '').toLowerCase();
-        if (/build|compile|test|pytest|vitest|jest/.test(cmd)) {
-          set(8,'verification','Running build / tests', 'Verification', 8);
-          addLog('Running verification…');
-        } else if (/lint|eslint|flake8|black|mypy|pylint|check/.test(cmd)) {
-          set(7,'gate-b','Quality checks', 'Gate B', 7);
-          addLog('Running quality checks…');
-        } else if (/commit|push|git add|checkout|branch/.test(cmd)) {
-          set(9,'commit','Git sync', 'Commit', 9);
-          addLog('Git: ' + (a.CommandLine || '').substring(0, 50));
-        } else {
-          set(6,'execution','Terminal command', 'Execution', 6);
-          addLog('CMD: ' + (a.CommandLine || '').substring(0, 50));
-        }
-      }
-      else if (t === 'search_web' || t === 'read_url_content') {
-        set(3,'workspace','Web research', 'Workspace', 3);
-        addLog('Searching/reading URL…');
-      }
-      else if (t === 'ask_question') {
-        set(5,'gate-a','Awaiting user input', 'Gate A', 5);
-        addLog('Waiting for user answer…');
-      }
-    });
-  }
-  else if (step.source === 'MODEL' && step.type === 'PLANNER_RESPONSE') {
-    set(10,'recap-archive','Response delivered', 'Response', 10);
-    addLog('Response sent to user.', 'SUCCESS');
-    state.step10Timestamp = Date.now();
-  }
-  else if (step.source === 'USER_EXPLICIT' && step.type === 'USER_INPUT') {
-    set(1,'orientation','New request received', 'Orientation', 1);
-    state.consoleLogs = [];
-    state.prompt = (step.content || '').slice(0, 120);
-    addLog('New user message received.');
-  }
-
-  if (state.currentStep !== 10) state.step10Timestamp = null;
-}
-
 function set(step, phase, subTask, historyLabel, histNum) {
   state.currentStep = step;
   state.phase       = phase;
@@ -227,54 +155,158 @@ function set(step, phase, subTask, historyLabel, histNum) {
   addHistory(historyLabel, histNum);
 }
 
-// ─── Incremental log reader ───────────────────────────────────────────────────
-function readIncremental(logPath) {
-  let stats;
-  try { stats = fs.statSync(logPath); }
-  catch { return; }
+// Global parsing results (updated live)
+let transcriptTokens = 0;
+let claudeMdTokens = 0;
+let requests = [];
+let modelName = 'Gemini 3.5 Flash';
+let contextLimit = 1000000;
+let tpmLimit = 1000000;
 
-  const reg = state.fileRegistry;
-
-  // Auto-transition step 10 → idle after 5s
-  if (state.currentStep === 10 && state.step10Timestamp && Date.now() - state.step10Timestamp > 5000) {
-    state.currentStep    = 0;
-    state.phase          = 'idle';
-    state.subTask        = 'Waiting…';
-    state.step10Timestamp = null;
-  }
-
-  if (stats.mtimeMs <= reg.lastModifiedTime) return;
-  reg.lastModifiedTime = stats.mtimeMs;
-
-  if (stats.size < reg.lastSize) reg.lastSize = 0; // rotation
-  const delta = stats.size - reg.lastSize;
-  if (delta <= 0) return;
-
-  let fd;
+function parseTranscriptFile(logPath) {
+  if (!fs.existsSync(logPath)) return;
+  
+  let content;
   try {
-    fd = fs.openSync(logPath, 'r');
-    const buf = Buffer.alloc(delta);
-    fs.readSync(fd, buf, 0, delta, reg.lastSize);
-    fs.closeSync(fd);
-    reg.lastSize = stats.size;
-    buf.toString('utf8').split('\n').forEach(l => { if (l.trim()) processLine(l); });
-  } catch (e) {
-    try { if (fd !== undefined) fs.closeSync(fd); } catch {}
+    content = fs.readFileSync(logPath, 'utf8');
+  } catch {
+    return;
   }
+
+  const lines = content.split('\n');
+  let cumulativeChars = 0;
+  const newRequests = [];
+  let currentModelName = 'Gemini 3.5 Flash';
+  let currentContextLimit = 1000000;
+  let currentTpmLimit = 1000000;
+
+  // Reset character counts for interactive UI view
+  state.userChars = 0;
+  state.modelChars = 0;
+  state.toolChars = 0;
+
+  lines.forEach(line => {
+    if (!line.trim()) return;
+    let step;
+    try { step = JSON.parse(line); } catch { return; }
+
+    const stepType = step.type || '';
+    const source = step.source || '';
+    let stepChars = 0;
+
+    // Character metrics
+    if (stepType === 'USER_INPUT' && step.content) {
+      stepChars = step.content.length;
+      state.userChars += stepChars;
+    } else if (stepType === 'PLANNER_RESPONSE') {
+      stepChars = (step.thinking || '').length + (step.content || '').length + (step.tool_calls ? JSON.stringify(step.tool_calls).length : 0);
+      state.modelChars += stepChars;
+    } else if (step.content) {
+      stepChars = step.content.length;
+      state.toolChars += stepChars;
+    }
+
+    cumulativeChars += stepChars;
+
+    // Model selection parsing
+    if (step.content && step.content.includes('Model Selection')) {
+      if (step.content.includes('Pro')) {
+        currentModelName = 'Gemini 3.5 Pro';
+        currentContextLimit = 2000000;
+        currentTpmLimit = 2000000;
+      } else if (step.content.includes('Flash')) {
+        currentModelName = 'Gemini 3.5 Flash';
+        currentContextLimit = 1000000;
+        currentTpmLimit = 1000000;
+      }
+    }
+
+    // Requests timestamp mapping for rate limit estimation
+    if (source === 'MODEL' && stepType === 'PLANNER_RESPONSE') {
+      let ts = Date.now();
+      if (step.created_at) {
+        try {
+          ts = new Date(step.created_at).getTime();
+        } catch {}
+      }
+      newRequests.push({
+        timestamp: ts,
+        tokens: Math.floor(cumulativeChars / CHARS_PER_TOKEN)
+      });
+    }
+
+    // Step detection for terminal activity view
+    if (source === 'MODEL' && step.tool_calls?.length) {
+      step.tool_calls.forEach(call => {
+        const t = call.name;
+        const a = call.arguments || call.args || {};
+
+        if (['view_file','list_dir','grep_search'].includes(t)) {
+          const file = a.AbsolutePath || a.DirectoryPath || a.SearchPath || '';
+          if (file.includes('implementation_plan.md')) {
+            set(4,'planning','Reviewing implementation plan', 'Planning', 4);
+          } else if (file.includes('task.md')) {
+            set(6,'execution','Checking task list', 'Execution', 6);
+          } else {
+            set(3,'workspace','Scanning files', 'Workspace', 3);
+          }
+        } else if (['write_to_file','replace_file_content','multi_replace_file_content'].includes(t)) {
+          set(6,'execution','Writing code', 'Execution', 6);
+        } else if (t === 'invoke_subagent') {
+          set(6,'execution','Spawning subagent', 'Execution', 6);
+        } else if (t === 'run_command') {
+          const cmd = (a.CommandLine || '').toLowerCase();
+          if (/build|compile|test|pytest|vitest|jest/.test(cmd)) {
+            set(8,'verification','Running build / tests', 'Verification', 8);
+          } else if (/lint|eslint|flake8|black|mypy|pylint|check/.test(cmd)) {
+            set(7,'gate-b','Quality checks', 'Gate B', 7);
+          } else if (/commit|push|git add|checkout|branch/.test(cmd)) {
+            set(9,'commit','Git sync', 'Commit', 9);
+          } else {
+            set(6,'execution','Terminal command', 'Execution', 6);
+          }
+        } else if (t === 'search_web' || t === 'read_url_content') {
+          set(3,'workspace','Web research', 'Workspace', 3);
+        } else if (t === 'ask_question') {
+          set(5,'gate-a','Awaiting user input', 'Gate A', 5);
+        }
+      });
+    } else if (source === 'MODEL' && stepType === 'PLANNER_RESPONSE') {
+      set(10,'recap-archive','Response delivered', 'Response', 10);
+      state.step10Timestamp = Date.now();
+    } else if (source === 'USER_EXPLICIT' && stepType === 'USER_INPUT') {
+      set(1,'orientation','New request received', 'Orientation', 1);
+      state.prompt = (step.content || '').slice(0, 120);
+    }
+  });
+
+  transcriptTokens = Math.floor(cumulativeChars / CHARS_PER_TOKEN);
+  requests = newRequests;
+  modelName = currentModelName;
+  contextLimit = currentContextLimit;
+  tpmLimit = currentTpmLimit;
+}
+
+function calculateRollingMetrics() {
+  const current_time_ms = Date.now();
+  const active_reqs = requests.filter(r => r.timestamp > current_time_ms - 60000);
+  const tpm_used = active_reqs.reduce((sum, r) => sum + r.tokens, 0);
+  
+  let refresh_secs = 0;
+  if (active_reqs.length > 0) {
+    const oldest_ts = Math.min(...active_reqs.map(r => r.timestamp));
+    const elapsed = current_time_ms - oldest_ts;
+    refresh_secs = Math.max(0, Math.ceil((60000 - elapsed) / 1000));
+  }
+  
+  return { tpm_used, refresh_secs };
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
 function fmtTokens(n) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k';
+  if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+  if (n >= 1000)     return (n / 1000).toFixed(1) + 'k';
   return String(n);
-}
-
-function fmtDuration(ms) {
-  if (ms <= 0) return '0h 00m';
-  const h = Math.floor(ms / (60 * 60 * 1000));
-  const m = Math.floor((ms % (60 * 60 * 1000)) / 60_000);
-  return h + 'h ' + String(m).padStart(2, '0') + 'm';
 }
 
 function asciiBar(pct, width, filledChar = '█', emptyChar = '░') {
@@ -282,41 +314,17 @@ function asciiBar(pct, width, filledChar = '█', emptyChar = '░') {
   return filledChar.repeat(filled) + emptyChar.repeat(width - filled);
 }
 
-function pad(str, len) {
-  const visible = str.replace(/\x1B\[[0-9;]*m/g, '');
-  return str + ' '.repeat(Math.max(0, len - visible.length));
-}
-
-function box(width, ...lines) {
-  const inner = width - 2;
-  const top    = '┌' + '─'.repeat(inner) + '┐';
-  const bottom = '└' + '─'.repeat(inner) + '┘';
-  const divider = '├' + '─'.repeat(inner) + '┤';
-  const row = (content) => {
-    const visible = content.replace(/\x1B\[[0-9;]*m/g, '');
-    const pad = Math.max(0, inner - 1 - visible.length);
-    return '│ ' + content + ' '.repeat(pad) + '│';
-  };
-  return [top, ...lines.map(l => l === '---' ? divider : row(l)), bottom].join('\n');
-}
-
 // ─── Render ───────────────────────────────────────────────────────────────────
 function render(convId) {
-  const now   = Date.now();
-  const total = state.userChars + state.modelChars + state.toolChars;
-  const tokens = Math.round(total / 3.8);
+  const total = BASE_SYSTEM_PROMPT_TOKENS + claudeMdTokens + transcriptTokens;
+  const percentContext = (total / contextLimit) * 100;
+  const ctxPctFmt = percentContext.toFixed(1) + '%';
 
-  // Context window
-  const remaining = state.firstStepTimestamp
-    ? Math.max(0, FIVE_H - (now - state.firstStepTimestamp))
-    : FIVE_H;
-  const ctxPct  = Math.min(100, ((FIVE_H - remaining) / FIVE_H) * 100);
-  const ctxPctFmt = ctxPct.toFixed(1) + '%';
+  const { refresh_secs } = calculateRollingMetrics();
 
-  let ctxBarColor;
-  if (ctxPct > 80)      ctxBarColor = c.bred;
-  else if (ctxPct > 50) ctxBarColor = c.byellow;
-  else                  ctxBarColor = c.bpurple;
+  let ctxBarColor = c.bpurple;
+  if (percentContext > 80)      ctxBarColor = c.bred;
+  else if (percentContext > 50) ctxBarColor = c.byellow;
 
   // Step
   const step     = state.currentStep;
@@ -327,17 +335,6 @@ function render(convId) {
     if (s === step) return colored(c.bgreen, '◉');
     return colored(c.gray, '○');
   }).join(' ');
-
-  // Last log entry
-  const lastLog = state.consoleLogs.length
-    ? state.consoleLogs[state.consoleLogs.length - 1]
-    : '—';
-  const logColor = lastLog.includes('[SUCCESS]') ? c.bgreen
-                 : lastLog.includes('[ERROR]')   ? c.bred
-                 : c.gray;
-
-  // Recent history (last 5)
-  const recentHistory = state.history.slice(-5).reverse();
 
   // Prompt excerpt
   const promptExcerpt = state.prompt
@@ -353,103 +350,90 @@ function render(convId) {
   const BAR_W = W - 22;
 
   const lines = [
-    // ── Header ──────────────────────────────────────────────────────────
     colored(c.bpurple, '  ◈  STATUS LINE') +
       colored(c.gray, '  Antigravity Monitor') +
       colored(c.dim, '  ' + timeStr),
-
     '',
-
-    // ── Session ──────────────────────────────────────────────────────────
     colored(c.gray, '  Session ') + colored(c.cyan, shortId) +
       colored(c.gray, '  ·  ') +
       (convId ? colored(c.bgreen, '● LIVE') : colored(c.bred, '● NO SESSION')),
-
     colored(c.gray, '  Last prompt: ') + colored(c.dim, promptExcerpt),
-
     '',
-
-    // ── Context window ────────────────────────────────────────────────────
     colored(c.bwhite, '  Context Window  ') +
-      ctxBarColor + asciiBar(ctxPct, BAR_W) + c.reset +
+      ctxBarColor + asciiBar(percentContext, BAR_W) + c.reset +
       colored(c.gray, '  ' + ctxPctFmt),
-
     colored(c.gray, '  ') +
-      colored(c.cyan, fmtDuration(remaining) + ' remaining') +
-      (state.firstStepTimestamp
-        ? colored(c.dim, '  (started ' + new Date(state.firstStepTimestamp).toLocaleTimeString('en-US', { hour12: false }) + ')')
-        : colored(c.dim, '  (no active session)')),
-
+      colored(c.cyan, `${fmtTokens(contextLimit - total)} remaining`) +
+      colored(c.dim, `  (model: ${modelName})`),
     '',
-
-    // ── Tokens ────────────────────────────────────────────────────────────
     colored(c.bwhite, '  Tokens  ') +
-      colored(c.bpurple, fmtTokens(tokens)) +
-      colored(c.gray, ' estimated (÷3.8 from chars)'),
-
-    colored(c.gray, '  User ') + colored(c.purple, fmtTokens(Math.round(state.userChars / 3.8))) +
-      colored(c.gray, '  ·  Model ') + colored(c.cyan, fmtTokens(Math.round(state.modelChars / 3.8))) +
-      colored(c.gray, '  ·  Tools ') + colored(c.green, fmtTokens(Math.round(state.toolChars / 3.8))),
-
+      colored(c.bpurple, fmtTokens(total)) +
+      colored(c.gray, ` total estimated (max: ${fmtTokens(contextLimit)})`),
+    colored(c.gray, '  Base System ') + colored(c.purple, fmtTokens(BASE_SYSTEM_PROMPT_TOKENS)) +
+      colored(c.gray, '  ·  CLAUDE.md ') + colored(c.cyan, fmtTokens(claudeMdTokens)) +
+      colored(c.gray, '  ·  Transcript ') + colored(c.green, fmtTokens(transcriptTokens)),
     '',
-
-    // ── Pipeline ──────────────────────────────────────────────────────────
+    colored(c.bwhite, '  Rate Limit  ') +
+      (refresh_secs > 0
+        ? colored(c.byellow, `Refresh: ${refresh_secs}s`)
+        : colored(c.bgreen, 'Idle / Full quota')),
+    '',
     colored(c.bwhite, '  Pipeline  ') +
       (step > 0
         ? colored(c.bgreen, 'Step ' + step + '/10 — ' + stepName)
         : colored(c.gray, 'Idle')),
-
     '  ' + stepBar,
-
     colored(c.gray, '  ↳ ') + colored(c.white, state.subTask),
-
     '',
-
-    // ── Last activity ─────────────────────────────────────────────────────
-    colored(c.bwhite, '  Last activity'),
-    colored(logColor, '  ' + lastLog.slice(0, W - 4)),
+    colored(c.gray, '  Press Ctrl+C to exit')
   ];
-
-  // Recent history
-  if (recentHistory.length > 0) {
-    lines.push('');
-    lines.push(colored(c.bwhite, '  Step history'));
-    recentHistory.forEach(h => {
-      lines.push(colored(c.dim, '  ' + h));
-    });
-  }
-
-  lines.push('');
-  lines.push(colored(c.gray, '  Press Ctrl+C to exit'));
 
   return lines.join('\n');
 }
 
+function getStatusLineString() {
+  const total = BASE_SYSTEM_PROMPT_TOKENS + claudeMdTokens + transcriptTokens;
+  const percentContext = (total / contextLimit) * 100;
+  const { refresh_secs } = calculateRollingMetrics();
+
+  const bar_length = 10;
+  const filled_length = Math.min(bar_length, Math.round((percentContext / 100) * bar_length));
+  const bar = '■'.repeat(filled_length) + '□'.repeat(bar_length - filled_length);
+
+  const ctx_str = (total / 1000).toFixed(1) + 'k';
+  const ctx_lim_str = contextLimit >= 1000000 ? (contextLimit / 1000000).toFixed(1) + 'M' : (contextLimit / 1000).toFixed(0) + 'k';
+
+  if (refresh_secs > 0) {
+    return `📊 Status: Context ~${ctx_str} / ${ctx_lim_str} (${percentContext.toFixed(1)}%) | Refresh: ${refresh_secs}s [${bar}]`;
+  } else {
+    return `📊 Status: Context ~${ctx_str} / ${ctx_lim_str} (${percentContext.toFixed(1)}%) [${bar}]`;
+  }
+}
+
 // ─── Main loop ────────────────────────────────────────────────────────────────
 function main() {
-  const convId = detectConversationId();
-  if (!convId) {
-    console.error('[status-line] ERROR: No Antigravity conversation found in', APP_DATA);
-    console.error('  Pass --conversationId <uuid> or --appDataDir <path>');
+  const conv = getLatestConversation();
+  if (!conv) {
+    console.error('[status-line] ERROR: No active conversation found.');
     process.exit(1);
   }
 
-  const logPath = path.join(APP_DATA, 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
+  const claudeMdPath = path.resolve(__dirname, '..', 'CLAUDE.md');
+  claudeMdTokens = calculateFileTokens(claudeMdPath);
 
-  if (!fs.existsSync(logPath)) {
-    console.error('[status-line] ERROR: Transcript not found:', logPath);
-    console.error('  Is Antigravity IDE running? Is this the right appDataDir?');
-    process.exit(1);
-  }
-
-  if (ONCE) {
-    // Full scan, print once, exit
-    readAllLines(logPath);
-    process.stdout.write(render(convId) + '\n');
+  if (STATUS) {
+    parseTranscriptFile(conv.logPath);
+    process.stdout.write(getStatusLineString() + '\n');
     process.exit(0);
   }
 
-  // Live mode
+  if (ONCE) {
+    parseTranscriptFile(conv.logPath);
+    process.stdout.write(render(conv.convId) + '\n');
+    process.exit(0);
+  }
+
+  // Live monitor CLI dashboard mode
   process.stdout.write(HIDE_CURSOR);
   process.on('exit', () => process.stdout.write(SHOW_CURSOR));
   process.on('SIGINT', () => {
@@ -457,29 +441,15 @@ function main() {
     process.exit(0);
   });
 
-  // Initial full scan
-  readAllLines(logPath);
+  // Init scan
+  parseTranscriptFile(conv.logPath);
+  process.stdout.write(CLR + render(conv.convId));
 
-  // First render
-  process.stdout.write(CLR + render(convId));
-
-  // Poll loop
+  // Loop poll
   setInterval(() => {
-    readIncremental(logPath);
-    process.stdout.write(CLR + render(convId));
+    parseTranscriptFile(conv.logPath);
+    process.stdout.write(CLR + render(conv.convId));
   }, INTERVAL);
-}
-
-function readAllLines(logPath) {
-  try {
-    const content = fs.readFileSync(logPath, 'utf8');
-    const lines = content.split('\n');
-    lines.forEach(l => { if (l.trim()) processLine(l); });
-    state.fileRegistry.lastSize = Buffer.byteLength(content, 'utf8');
-    state.fileRegistry.lastModifiedTime = fs.statSync(logPath).mtimeMs;
-  } catch (e) {
-    // file might not exist yet
-  }
 }
 
 main();
