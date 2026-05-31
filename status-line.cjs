@@ -158,10 +158,8 @@ function set(step, phase, subTask, historyLabel, histNum) {
 // Global parsing results (updated live)
 let transcriptTokens = 0;
 let claudeMdTokens = 0;
-let requests = [];
 let modelName = 'Gemini 3.5 Flash';
 let contextLimit = 1000000;
-let tpmLimit = 1000000;
 
 function parseTranscriptFile(logPath) {
   if (!fs.existsSync(logPath)) return;
@@ -175,10 +173,8 @@ function parseTranscriptFile(logPath) {
 
   const lines = content.split('\n');
   let cumulativeChars = 0;
-  const newRequests = [];
   let currentModelName = 'Gemini 3.5 Flash';
   let currentContextLimit = 1000000;
-  let currentTpmLimit = 1000000;
 
   // Reset character counts for interactive UI view
   state.userChars = 0;
@@ -208,31 +204,22 @@ function parseTranscriptFile(logPath) {
 
     cumulativeChars += stepChars;
 
-    // Model selection parsing
+    // Model selection parsing with strict regex boundary checks
     if (step.content && step.content.includes('Model Selection')) {
-      if (step.content.includes('Pro')) {
-        currentModelName = 'Gemini 3.5 Pro';
-        currentContextLimit = 2000000;
-        currentTpmLimit = 2000000;
-      } else if (step.content.includes('Flash')) {
-        currentModelName = 'Gemini 3.5 Flash';
-        currentContextLimit = 1000000;
-        currentTpmLimit = 1000000;
+      const match = step.content.match(/Model Selection.*?(?:from\s+[a-zA-Z0-9.\s()]+)?\s+to\s+([a-zA-Z0-9.\s()]+)/i);
+      if (match) {
+        const destModel = match[1].toLowerCase();
+        if (destModel.includes('pro')) {
+          currentModelName = 'Gemini 3.5 Pro';
+          currentContextLimit = 2000000;
+        } else if (destModel.includes('flash')) {
+          currentModelName = 'Gemini 3.5 Flash';
+          currentContextLimit = 1000000;
+        } else if (destModel.includes('sonnet')) {
+          currentModelName = 'Claude Sonnet 4.6';
+          currentContextLimit = 200000;
+        }
       }
-    }
-
-    // Requests timestamp mapping for rate limit estimation
-    if (source === 'MODEL' && stepType === 'PLANNER_RESPONSE') {
-      let ts = Date.now();
-      if (step.created_at) {
-        try {
-          ts = new Date(step.created_at).getTime();
-        } catch {}
-      }
-      newRequests.push({
-        timestamp: ts,
-        tokens: Math.floor(cumulativeChars / CHARS_PER_TOKEN)
-      });
     }
 
     // Step detection for terminal activity view
@@ -281,25 +268,8 @@ function parseTranscriptFile(logPath) {
   });
 
   transcriptTokens = Math.floor(cumulativeChars / CHARS_PER_TOKEN);
-  requests = newRequests;
   modelName = currentModelName;
   contextLimit = currentContextLimit;
-  tpmLimit = currentTpmLimit;
-}
-
-function calculateRollingMetrics() {
-  const current_time_ms = Date.now();
-  const active_reqs = requests.filter(r => r.timestamp > current_time_ms - 60000);
-  const tpm_used = active_reqs.reduce((sum, r) => sum + r.tokens, 0);
-  
-  let refresh_secs = 0;
-  if (active_reqs.length > 0) {
-    const oldest_ts = Math.min(...active_reqs.map(r => r.timestamp));
-    const elapsed = current_time_ms - oldest_ts;
-    refresh_secs = Math.max(0, Math.ceil((60000 - elapsed) / 1000));
-  }
-  
-  return { tpm_used, refresh_secs };
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
@@ -319,8 +289,6 @@ function render(convId) {
   const total = BASE_SYSTEM_PROMPT_TOKENS + claudeMdTokens + transcriptTokens;
   const percentContext = (total / contextLimit) * 100;
   const ctxPctFmt = percentContext.toFixed(1) + '%';
-
-  const { refresh_secs } = calculateRollingMetrics();
 
   let ctxBarColor = c.bpurple;
   if (percentContext > 80)      ctxBarColor = c.bred;
@@ -373,11 +341,6 @@ function render(convId) {
       colored(c.gray, '  ·  CLAUDE.md ') + colored(c.cyan, fmtTokens(claudeMdTokens)) +
       colored(c.gray, '  ·  Transcript ') + colored(c.green, fmtTokens(transcriptTokens)),
     '',
-    colored(c.bwhite, '  Rate Limit  ') +
-      (refresh_secs > 0
-        ? colored(c.byellow, `Refresh: ${refresh_secs}s`)
-        : colored(c.bgreen, 'Idle / Full quota')),
-    '',
     colored(c.bwhite, '  Pipeline  ') +
       (step > 0
         ? colored(c.bgreen, 'Step ' + step + '/10 — ' + stepName)
@@ -394,7 +357,6 @@ function render(convId) {
 function getStatusLineString() {
   const total = BASE_SYSTEM_PROMPT_TOKENS + claudeMdTokens + transcriptTokens;
   const percentContext = (total / contextLimit) * 100;
-  const { refresh_secs } = calculateRollingMetrics();
 
   const bar_length = 10;
   const filled_length = Math.min(bar_length, Math.round((percentContext / 100) * bar_length));
@@ -403,11 +365,7 @@ function getStatusLineString() {
   const ctx_str = (total / 1000).toFixed(1) + 'k';
   const ctx_lim_str = contextLimit >= 1000000 ? (contextLimit / 1000000).toFixed(1) + 'M' : (contextLimit / 1000).toFixed(0) + 'k';
 
-  if (refresh_secs > 0) {
-    return `📊 Status: Context ~${ctx_str} / ${ctx_lim_str} (${percentContext.toFixed(1)}%) | Refresh: ${refresh_secs}s [${bar}]`;
-  } else {
-    return `📊 Status: Context ~${ctx_str} / ${ctx_lim_str} (${percentContext.toFixed(1)}%) [${bar}]`;
-  }
+  return `📊 Status: Context ~${ctx_str} / ${ctx_lim_str} (${percentContext.toFixed(1)}%) [${bar}]`;
 }
 
 // ─── Main loop ────────────────────────────────────────────────────────────────
