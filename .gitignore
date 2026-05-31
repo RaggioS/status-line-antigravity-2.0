@@ -1,5 +1,3 @@
 node_modules/
-dist/
-public/session_state.json
-*.local
 .DS_Store
+*.local

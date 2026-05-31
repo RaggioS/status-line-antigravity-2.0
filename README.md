@@ -1,16 +1,34 @@
-# React + Vite
+# Status Line — Antigravity Session Monitor
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Monitors Antigravity IDE sessions in real time. **No server, no browser, no npm install.** Pure Node.js.
 
-Currently, two official plugins are available:
+## Usage
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+# Live dashboard (updates every 1s, Ctrl+C to exit)
+node status-line.cjs
 
-## React Compiler
+# Print once and exit (for scripts / shell prompts)
+node status-line.cjs --once
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+# Specific conversation
+node status-line.cjs --conversationId <uuid>
 
-## Expanding the ESLint configuration
+# Custom appData path
+node status-line.cjs --appDataDir "C:\path\to\antigravity"
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## What it shows
+
+| Metric | Source | Real? |
+|---|---|---|
+| Context window (5h) | `firstStepTimestamp` from transcript | ✅ Real |
+| Token estimate | `chars / 3.8` from log content | ✅ Approximated but real |
+| Token breakdown (user/model/tools) | Classified by `source` field | ✅ Real |
+| Pipeline step | Pattern-matched from `tool_calls` | ✅ Real |
+| Rate limit reset | — | ❌ Not shown (unknown) |
+
+## Requirements
+
+- Node.js (any recent version)
+- Antigravity IDE running with default appData path, or pass `--appDataDir`
