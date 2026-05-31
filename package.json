@@ -1,6 +1,12 @@
 {
   "name": "status-line",
   "version": "1.0.0",
-  "description": "Real-time terminal status monitor for Antigravity IDE sessions",
-  "private": true
+  "description": "Real-time terminal status monitor for Antigravity 2.0 IDE sessions",
+  "private": true,
+  "bin": {
+    "status-line-monitor": "./status-line.cjs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 0"
+  }
 }
