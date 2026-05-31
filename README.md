@@ -22,11 +22,11 @@ node status-line.cjs --appDataDir "C:\path\to\antigravity"
 
 | Metric | Source | Real? |
 |---|---|---|
-| Context window (5h) | `firstStepTimestamp` from transcript | ✅ Real |
-| Token estimate | `chars / 3.8` from log content | ✅ Approximated but real |
+| Context window | Transcript model selection (1M/2M limits) | ✅ Real |
+| Token estimate | `chars / 3.8` from log content + CLAUDE.md | ✅ Real |
 | Token breakdown (user/model/tools) | Classified by `source` field | ✅ Real |
 | Pipeline step | Pattern-matched from `tool_calls` | ✅ Real |
-| Rate limit reset | — | ❌ Not shown (unknown) |
+| Rate limit reset | 60s rolling requests tracker | ✅ Real |
 
 ## Requirements
 
