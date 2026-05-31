@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * status-line.cjs — Antigravity Session Monitor
+ * status-line.cjs — Antigravity 2.0 Session Monitor
  *
  * Usage:
  *   node status-line.cjs
@@ -81,7 +81,7 @@ function getLatestConversation() {
     try {
       const dirs = fs.readdirSync(brainDir);
       for (const d of dirs) {
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(d)) continue;
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(d)) continue;
         const logPath = path.join(brainDir, d, '.system_generated', 'logs', 'transcript.jsonl');
         if (!fs.existsSync(logPath)) continue;
         try {
@@ -109,28 +109,25 @@ function calculateFileTokens(filePath) {
 }
 
 // ─── Persistent storage helpers ──────────────────────────────────────────────
-function loadPersistedData(appData, convId) {
+function loadPersistedSteps(appData, convId) {
   const tokenFile = path.join(appData, 'brain', convId, 'session_tokens.json');
   if (fs.existsSync(tokenFile)) {
     try {
       const data = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
-      return {
-        steps: data.steps || {},
-        processedRequests: data.processedRequests || {}
-      };
+      return data.steps || {};
     } catch {
-      return { steps: {}, processedRequests: {} };
+      return {};
     }
   }
-  return { steps: {}, processedRequests: {} };
+  return {};
 }
 
-function savePersistedData(appData, convId, steps, processedRequests) {
+function savePersistedSteps(appData, convId, steps) {
   const brainDir = path.join(appData, 'brain', convId);
   if (!fs.existsSync(brainDir)) return;
   const tokenFile = path.join(brainDir, 'session_tokens.json');
   try {
-    fs.writeFileSync(tokenFile, JSON.stringify({ steps, processedRequests }, null, 2), 'utf8');
+    fs.writeFileSync(tokenFile, JSON.stringify({ steps }, null, 2), 'utf8');
   } catch {}
 }
 
@@ -184,7 +181,6 @@ function set(step, phase, subTask, historyLabel, histNum) {
 // Global parsing results (updated live)
 let transcriptTokens = 0;
 let claudeMdTokens = 0;
-let cumulativeSessionTokens = 0;
 let currentPromptTokens = 0;
 let modelName = 'Gemini 3.5 Flash';
 let contextLimit = 1000000;
@@ -200,12 +196,11 @@ function parseTranscriptFile(logPath, appData, convId) {
   }
 
   const lines = content.split('\n');
-  let cumulativeChars = 0;
   let currentModelName = 'Gemini 3.5 Flash';
   let currentContextLimit = 1000000;
 
-  // Load previously persisted step & request counts
-  const { steps, processedRequests } = loadPersistedData(appData, convId);
+  // Load previously persisted step counts
+  const steps = loadPersistedSteps(appData, convId);
   let lastUserInputIndex = 0;
 
   // Reset character counts for interactive UI view
@@ -238,18 +233,9 @@ function parseTranscriptFile(logPath, appData, convId) {
       state.toolChars += stepChars;
     }
 
-    cumulativeChars += stepChars;
-
     // Save tokens for this specific step index in the persistent map
     if (step.step_index !== undefined) {
       steps[step.step_index] = Math.floor(stepChars / CHARS_PER_TOKEN);
-    }
-
-    // Save API request tokens for MODEL steps (which represent API requests)
-    if (source === 'MODEL' && step.step_index !== undefined) {
-      // Total tokens processed by this API request (input context + output step)
-      const reqTokens = BASE_SYSTEM_PROMPT_TOKENS + claudeMdTokens + Math.floor(cumulativeChars / CHARS_PER_TOKEN);
-      processedRequests[step.step_index] = reqTokens;
     }
 
     // Model selection parsing with strict regex boundary checks
@@ -315,21 +301,18 @@ function parseTranscriptFile(logPath, appData, convId) {
     }
   });
 
-  // Save the updated maps back to the persistent file
-  savePersistedData(appData, convId, steps, processedRequests);
+  // Save the updated steps back to the persistent file
+  savePersistedSteps(appData, convId, steps);
 
   // Sum all steps to get active context window tokens
   transcriptTokens = Object.values(steps).reduce((sum, val) => sum + val, 0);
 
-  // Calculate cumulative session tokens (sum of all API requests made)
-  cumulativeSessionTokens = Object.values(processedRequests).reduce((sum, val) => sum + val, 0);
-
-  // Calculate current prompt tokens (sum of requests in the current prompt/response turn)
+  // Calculate current prompt/turn tokens (sum of step-tokens in the current prompt/response turn)
   currentPromptTokens = 0;
-  Object.keys(processedRequests).forEach(stepIdx => {
+  Object.keys(steps).forEach(stepIdx => {
     const idx = parseInt(stepIdx, 10);
     if (idx >= lastUserInputIndex) {
-      currentPromptTokens += processedRequests[stepIdx];
+      currentPromptTokens += steps[stepIdx];
     }
   });
 
@@ -399,20 +382,16 @@ function render(convId) {
       colored(c.cyan, `${fmtTokens(contextLimit - total)} remaining`) +
       colored(c.dim, `  (model: ${modelName})`),
     '',
-    colored(c.bwhite, '  Active Memory  ') +
+    colored(c.bwhite, '  Context Tokens  ') +
       colored(c.bpurple, fmtTokens(total)) +
-      colored(c.gray, ` tokens currently in context (max: ${fmtTokens(contextLimit)})`),
+      colored(c.gray, ` total active context tokens (max: ${fmtTokens(contextLimit)})`),
     colored(c.gray, '  Base System ') + colored(c.purple, fmtTokens(BASE_SYSTEM_PROMPT_TOKENS)) +
       colored(c.gray, '  ·  CLAUDE.md ') + colored(c.cyan, fmtTokens(claudeMdTokens)) +
       colored(c.gray, '  ·  Active Transcript ') + colored(c.green, fmtTokens(transcriptTokens)),
     '',
-    colored(c.bwhite, '  Session Usage (Cumulative)  ') +
-      colored(c.bpurple, fmtTokens(cumulativeSessionTokens)) +
-      colored(c.gray, ' total API tokens consumed in this session'),
-    '',
-    colored(c.bwhite, '  Last Turn Cost  ') +
-      colored(c.byellow, fmtTokens(currentPromptTokens)) +
-      colored(c.gray, ' tokens processed in the last prompt/response'),
+    colored(c.bwhite, '  Last Turn Increment  ') +
+      colored(c.byellow, `+${fmtTokens(currentPromptTokens)}`) +
+      colored(c.gray, ' net new tokens added in the last user/model turn'),
     '',
     colored(c.bwhite, '  Pipeline  ') +
       (step > 0
@@ -438,10 +417,9 @@ function getStatusLineString() {
   const ctx_str = (total / 1000).toFixed(1) + 'k';
   const ctx_lim_str = contextLimit >= 1000000 ? (contextLimit / 1000000).toFixed(1) + 'M' : (contextLimit / 1000).toFixed(0) + 'k';
 
-  const sess_str = fmtTokens(cumulativeSessionTokens);
   const prompt_str = fmtTokens(currentPromptTokens);
 
-  return `📊 Status: Context ~${ctx_str} / ${ctx_lim_str} (${percentContext.toFixed(1)}%) [${bar}] | Session: ${sess_str} | Prompt: ${prompt_str}`;
+  return `📊 Status: Context ~${ctx_str} / ${ctx_lim_str} (${percentContext.toFixed(1)}%) [${bar}] | Prompt: +${prompt_str}`;
 }
 
 // ─── Main loop ────────────────────────────────────────────────────────────────
