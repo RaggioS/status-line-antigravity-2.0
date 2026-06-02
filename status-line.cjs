@@ -14,6 +14,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const os   = require('os');
 
 // ─── CLI args ───────────────────────────────────────────────────────────────
 const argv = {};
@@ -25,10 +26,11 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
+const homeDir = os.homedir();
 const APP_DATA_DIRS = [
-  'C:\\Users\\raimo\\.gemini\\antigravity',
-  'C:\\Users\\raimo\\.gemini\\antigravity-cli',
-  'C:\\Users\\raimo\\.gemini\\antigravity-ide'
+  path.join(homeDir, '.gemini', 'antigravity'),
+  path.join(homeDir, '.gemini', 'antigravity-cli'),
+  path.join(homeDir, '.gemini', 'antigravity-ide')
 ];
 
 const ONCE     = argv.once === true;
@@ -120,6 +122,18 @@ function calculateFileTokens(filePath) {
   } catch {
     return 0;
   }
+}
+
+function findClaudeMd(startDir) {
+  let dir = startDir;
+  while (true) {
+    const p = path.join(dir, 'CLAUDE.md');
+    if (fs.existsSync(p)) return p;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
 }
 
 // ─── Persistent storage helpers ──────────────────────────────────────────────
@@ -437,8 +451,8 @@ function main() {
     process.exit(1);
   }
 
-  const claudeMdPath = path.resolve(__dirname, '..', 'CLAUDE.md');
-  claudeMdTokens = calculateFileTokens(claudeMdPath);
+  const claudeMdPath = findClaudeMd(process.cwd());
+  claudeMdTokens = claudeMdPath ? calculateFileTokens(claudeMdPath) : 0;
 
   if (STATUS) {
     parseTranscriptFile(conv.logPath, conv.appData, conv.convId);
