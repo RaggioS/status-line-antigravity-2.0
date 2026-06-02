@@ -10,8 +10,8 @@ Follow these simple steps to install and set up the status line monitor:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/RaggioS/status-line-antigravity.git
-cd status-line-antigravity
+git clone https://github.com/RaggioS/status-line-antigravity-2.0.git
+cd status-line-antigravity-2.0
 
 # 2. Register the tool globally (adds 'status-line-monitor' command system-wide)
 npm link
