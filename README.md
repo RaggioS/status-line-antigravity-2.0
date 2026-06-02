@@ -22,7 +22,7 @@ npm link
 
 ### 💬 Install as a Slash Command (`/status-line`)
 
-To make the `/status-line` command available inside your Antigravity or Claude Code agent sessions:
+To make the `/status-line` command available inside your Antigravity 2.0 agent sessions:
 
 1. Create a `.claude/commands/` folder at the root of your working projects if it doesn't exist.
 2. Copy the command template from this repository into that folder:
